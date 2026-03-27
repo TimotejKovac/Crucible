@@ -1555,6 +1555,15 @@ struct ContentView: View {
     @EnvironmentObject var sidebarSelectionState: SidebarSelectionState
     @EnvironmentObject var cmuxConfigStore: CmuxConfigStore
     @State private var sidebarWidth: CGFloat = 200
+    @State private var rightPanelWidth: CGFloat = 50
+    @State private var isRightPanelVisible: Bool = true
+    @State private var rightPanelDragStartWidth: CGFloat?
+    @State private var isRightPanelResizerDragging = false
+    @State private var rightPanelShortcuts: [RightPanelShortcut] = [
+        RightPanelShortcut(path: "/home", icon: "house.fill"),
+        RightPanelShortcut(path: "/debug", icon: "ladybug.fill"),
+        RightPanelShortcut(path: "/settings", icon: "gearshape.fill"),
+    ]
     @State private var hoveredResizerHandles: Set<SidebarResizerHandle> = []
     @State private var isResizerDragging = false
     @State private var sidebarDragStartWidth: CGFloat?
@@ -2322,15 +2331,216 @@ struct ContentView: View {
     }
 
     private var sidebarView: some View {
-        VerticalTabsSidebar(
-            updateViewModel: updateViewModel,
-            onSendFeedback: presentFeedbackComposer,
-            selection: $sidebarSelectionState.selection,
-            selectedTabIds: $selectedTabIds,
-            lastSidebarSelectionIndex: $lastSidebarSelectionIndex
-        )
+        HStack(spacing: 0) {
+            VerticalTabsSidebar(
+                updateViewModel: updateViewModel,
+                onSendFeedback: presentFeedbackComposer,
+                selection: $sidebarSelectionState.selection,
+                selectedTabIds: $selectedTabIds,
+                lastSidebarSelectionIndex: $lastSidebarSelectionIndex
+            )
+            Rectangle()
+                .fill(Color.primary.opacity(0.15))
+                .frame(width: 1)
+        }
         .frame(width: sidebarWidth)
         .frame(maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private static let minimumRightPanelWidth: CGFloat = 40
+    private static let maximumRightPanelWidth: CGFloat = 400
+
+    private func navigateBrowserToPath(_ path: String) {
+        guard let panel = tabManager.focusedBrowserPanel,
+              let currentURL = panel.currentURL,
+              var components = URLComponents(url: currentURL, resolvingAgainstBaseURL: false)
+        else { return }
+        components.path = path.hasPrefix("/") ? path : "/\(path)"
+        components.query = nil
+        components.fragment = nil
+        if let url = components.url {
+            panel.navigate(to: url)
+        }
+    }
+
+    private static let defaultIconForPath: [String: String] = [
+        "/home": "house.fill",
+        "/debug": "ladybug.fill",
+        "/settings": "gearshape.fill",
+    ]
+
+    private static let availableIcons: [String] = [
+        "link", "star.fill", "bolt.fill", "flag.fill", "heart.fill",
+        "bookmark.fill", "tag.fill", "mappin", "bell.fill", "envelope.fill",
+        "cart.fill", "person.fill", "magnifyingglass", "doc.fill", "folder.fill",
+        "tray.fill", "archivebox.fill", "cube.fill", "puzzlepiece.fill", "gamecontroller.fill",
+        "paintbrush.fill", "wrench.fill", "hammer.fill", "ant.fill", "leaf.fill",
+        "house.fill", "ladybug.fill", "gearshape.fill",
+    ]
+
+    private func promptAddShortcut() {
+        guard let window = NSApp.keyWindow else { return }
+        let alert = NSAlert()
+        alert.messageText = String(localized: "alert.addShortcut.title", defaultValue: "Add Shortcut")
+        alert.informativeText = String(localized: "alert.addShortcut.message", defaultValue: "Enter a relative path and choose an icon.")
+
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 280, height: 60))
+
+        let pathLabel = NSTextField(labelWithString: "Path:")
+        pathLabel.frame = NSRect(x: 0, y: 36, width: 40, height: 22)
+        container.addSubview(pathLabel)
+
+        let pathInput = NSTextField(string: "/")
+        pathInput.placeholderString = "/path"
+        pathInput.frame = NSRect(x: 44, y: 36, width: 236, height: 22)
+        container.addSubview(pathInput)
+
+        let iconLabel = NSTextField(labelWithString: "Icon:")
+        iconLabel.frame = NSRect(x: 0, y: 6, width: 40, height: 22)
+        container.addSubview(iconLabel)
+
+        let iconPicker = NSPopUpButton(frame: NSRect(x: 44, y: 4, width: 236, height: 26), pullsDown: false)
+        for iconName in Self.availableIcons {
+            let item = NSMenuItem()
+            item.title = iconName.replacingOccurrences(of: ".fill", with: "").replacingOccurrences(of: ".", with: " ")
+            if let img = NSImage(systemSymbolName: iconName, accessibilityDescription: nil) {
+                item.image = img
+            }
+            item.representedObject = iconName
+            iconPicker.menu?.addItem(item)
+        }
+        container.addSubview(iconPicker)
+
+        alert.accessoryView = container
+        alert.addButton(withTitle: String(localized: "alert.addShortcut.add", defaultValue: "Add"))
+        alert.addButton(withTitle: String(localized: "alert.addShortcut.cancel", defaultValue: "Cancel"))
+        alert.window.initialFirstResponder = pathInput
+
+        alert.beginSheetModal(for: window) { response in
+            guard response == .alertFirstButtonReturn else { return }
+            let path = pathInput.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !path.isEmpty else { return }
+            let normalizedPath = path.hasPrefix("/") ? path : "/\(path)"
+            let selectedIcon: String
+            if let defaultIcon = Self.defaultIconForPath[normalizedPath] {
+                selectedIcon = defaultIcon
+            } else if let picked = iconPicker.selectedItem?.representedObject as? String {
+                selectedIcon = picked
+            } else {
+                selectedIcon = "link"
+            }
+            if !rightPanelShortcuts.contains(where: { $0.path == normalizedPath }) {
+                rightPanelShortcuts.append(RightPanelShortcut(path: normalizedPath, icon: selectedIcon))
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            alert.window.makeFirstResponder(pathInput)
+            pathInput.currentEditor()?.selectAll(nil)
+        }
+    }
+
+    private func promptRemoveShortcut(_ shortcut: RightPanelShortcut) {
+        guard let window = NSApp.keyWindow else { return }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = String(localized: "alert.removeShortcut.title", defaultValue: "Remove Shortcut")
+        alert.informativeText = String(
+            format: String(localized: "alert.removeShortcut.message", defaultValue: "Remove \"%@\" from the shortcut bar?"),
+            shortcut.path
+        )
+        alert.addButton(withTitle: String(localized: "alert.removeShortcut.remove", defaultValue: "Remove"))
+        alert.addButton(withTitle: String(localized: "alert.removeShortcut.cancel", defaultValue: "Cancel"))
+        alert.beginSheetModal(for: window) { response in
+            guard response == .alertFirstButtonReturn else { return }
+            rightPanelShortcuts.removeAll { $0.id == shortcut.id }
+        }
+    }
+
+    private var rightPanelView: some View {
+        let hasWebView = tabManager.focusedBrowserPanel?.shouldRenderWebView ?? false
+
+        return VStack(spacing: 8) {
+            Spacer()
+                .frame(height: 8)
+
+            ForEach(rightPanelShortcuts) { shortcut in
+                RightPanelShortcutButton(
+                    shortcut: shortcut,
+                    hasWebView: hasWebView,
+                    onNavigate: { navigateBrowserToPath(shortcut.path) },
+                    onRemove: { promptRemoveShortcut(shortcut) }
+                )
+            }
+
+            Button(action: {
+                promptAddShortcut()
+            }) {
+                Image(systemName: "plus")
+                    .font(.system(size: 14, weight: .medium))
+                    .frame(width: 25, height: 25)
+                    .foregroundStyle(Color.white.opacity(0.5))
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .safeHelp(String(localized: "rightPanel.addShortcut.tooltip", defaultValue: "Add shortcut"))
+
+            Spacer()
+        }
+        .frame(width: rightPanelWidth)
+        .frame(maxHeight: .infinity)
+        .background(Color(nsColor: GhosttyApp.shared.defaultBackgroundColor))
+        .overlay(alignment: .leading) {
+            Rectangle()
+                .fill(Color.primary.opacity(0.15))
+                .frame(width: 1)
+        }
+        .colorScheme(.dark)
+    }
+
+    private var rightPanelResizerOverlay: some View {
+        GeometryReader { proxy in
+            let totalWidth = max(0, proxy.size.width)
+            let resizerX = max(0, totalWidth - rightPanelWidth - 4)
+
+            HStack(spacing: 0) {
+                Color.clear
+                    .frame(width: resizerX)
+                    .allowsHitTesting(false)
+
+                Color.clear
+                    .frame(width: 8)
+                    .contentShape(Rectangle())
+                    .onHover { hovering in
+                        if hovering {
+                            NSCursor.resizeLeftRight.push()
+                        } else {
+                            NSCursor.pop()
+                        }
+                    }
+                    .gesture(
+                        DragGesture(minimumDistance: 1)
+                            .onChanged { value in
+                                if rightPanelDragStartWidth == nil {
+                                    rightPanelDragStartWidth = rightPanelWidth
+                                }
+                                let startWidth = rightPanelDragStartWidth ?? rightPanelWidth
+                                let nextWidth = max(
+                                    Self.minimumRightPanelWidth,
+                                    min(startWidth - value.translation.width, Self.maximumRightPanelWidth)
+                                )
+                                rightPanelWidth = nextWidth
+                            }
+                            .onEnded { _ in
+                                rightPanelDragStartWidth = nil
+                            }
+                    )
+
+                Color.clear
+                    .frame(maxWidth: .infinity)
+                    .allowsHitTesting(false)
+            }
+            .frame(width: totalWidth, height: proxy.size.height, alignment: .leading)
+        }
     }
 
     /// Space at top of content area for the titlebar. This must be at least the actual titlebar
@@ -2466,18 +2676,6 @@ struct ContentView: View {
                     fullscreenControls
                 }
 
-                // Draggable folder icon + focused command name
-                if let directory = focusedDirectory {
-                    DraggableFolderIcon(directory: directory)
-                        .padding(.leading, -6)
-                }
-
-                Text(titlebarText)
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundColor(fakeTitlebarTextColor)
-                    .lineLimit(1)
-                    .allowsHitTesting(false)
-
                 Spacer()
 
             }
@@ -2490,22 +2688,8 @@ struct ContentView: View {
         .frame(maxWidth: .infinity)
         .contentShape(Rectangle())
         .background(TitlebarDoubleClickMonitorView())
-        .background({
-            // The terminal area has two stacked semi-transparent layers: the Bonsplit
-            // container chrome background plus Ghostty's own Metal-rendered background.
-            // Compute the effective composited opacity so the titlebar matches visually.
-            let alpha = CGFloat(GhosttyApp.shared.defaultBackgroundOpacity)
-            let effective = alpha >= 0.999 ? alpha : 1.0 - pow(1.0 - alpha, 2)
-            return TitlebarLayerBackground(
-                backgroundColor: GhosttyApp.shared.defaultBackgroundColor,
-                opacity: effective
-            )
-        }())
-        .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(Color(nsColor: .separatorColor))
-                .frame(height: 1)
-        }
+        .background(Color(nsColor: GhosttyApp.shared.defaultBackgroundColor))
+        .colorScheme(.dark)
     }
 
     private func updateTitlebarText() {
@@ -2595,8 +2779,14 @@ struct ContentView: View {
                 ZStack(alignment: .leading) {
                     terminalContentWithSidebarDropOverlay
                         .padding(.leading, sidebarState.isVisible ? sidebarWidth : 0)
+                        .padding(.trailing, isRightPanelVisible ? rightPanelWidth : 0)
                     if sidebarState.isVisible {
                         sidebarView
+                    }
+                }
+                .overlay(alignment: .trailing) {
+                    if isRightPanelVisible {
+                        rightPanelView
                     }
                 }
             )
@@ -2608,6 +2798,9 @@ struct ContentView: View {
                         sidebarView
                     }
                     terminalContentWithSidebarDropOverlay
+                    if isRightPanelVisible {
+                        rightPanelView
+                    }
                 }
             )
         }
@@ -8455,6 +8648,61 @@ enum CommandPaletteSearchEngine {
     }
 }
 
+struct RightPanelShortcut: Identifiable, Equatable {
+    let id = UUID()
+    let path: String
+    let icon: String
+}
+
+private struct RightPanelShortcutButton: View {
+    let shortcut: RightPanelShortcut
+    let hasWebView: Bool
+    let onNavigate: () -> Void
+    let onRemove: () -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            Button(action: onNavigate) {
+                Image(systemName: shortcut.icon)
+                    .font(.system(size: 16))
+                    .frame(width: 30, height: 30)
+                    .foregroundStyle(hasWebView ? Color.white : Color.white.opacity(0.3))
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(isHovered ? Color.white.opacity(0.12) : Color.clear)
+                    )
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(!hasWebView)
+            .safeHelp(shortcut.path)
+
+            if isHovered {
+                Button(action: onRemove) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 7, weight: .bold))
+                        .foregroundStyle(Color.white.opacity(0.8))
+                        .frame(width: 12, height: 12)
+                        .background(
+                            Circle()
+                                .fill(Color.red.opacity(0.7))
+                        )
+                }
+                .buttonStyle(.plain)
+                .offset(x: 4, y: -4)
+                .transition(.opacity)
+            }
+        }
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.12)) {
+                isHovered = hovering
+            }
+        }
+    }
+}
+
 private struct SidebarResizerAccessibilityModifier: ViewModifier {
     let accessibilityIdentifier: String?
 
@@ -8603,10 +8851,6 @@ struct VerticalTabsSidebar: View {
                     .frame(width: 0, height: 0)
                 )
                 .overlay(alignment: .top) {
-                    SidebarTopScrim(height: trafficLightPadding + 20)
-                        .allowsHitTesting(false)
-                }
-                .overlay(alignment: .top) {
                     // Match native titlebar behavior in the sidebar top strip:
                     // drag-to-move and double-click action (zoom/minimize).
                     WindowDragHandleView()
@@ -8628,7 +8872,8 @@ struct VerticalTabsSidebar: View {
         }
         .accessibilityIdentifier("Sidebar")
         .ignoresSafeArea()
-        .background(SidebarBackdrop().ignoresSafeArea())
+        .background(Color(nsColor: GhosttyApp.shared.defaultBackgroundColor).ignoresSafeArea())
+        .colorScheme(.dark)
         .background(
             WindowAccessor { window in
                 modifierKeyMonitor.setHostWindow(window)
@@ -8682,6 +8927,33 @@ struct VerticalTabsSidebar: View {
             draggedTabId = nil
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .onChange(of: tabManager.pendingRenameWorkspaceId) { newValue in
+            guard let workspaceId = newValue,
+                  let workspace = tabManager.tabs.first(where: { $0.id == workspaceId }) else { return }
+            tabManager.pendingRenameWorkspaceId = nil
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                guard let window = NSApp.keyWindow else { return }
+                let alert = NSAlert()
+                alert.messageText = String(localized: "alert.nameWorkspace.title", defaultValue: "Name Workspace")
+                alert.informativeText = String(localized: "alert.nameWorkspace.message", defaultValue: "Choose a name for the new workspace.")
+                let input = NSTextField(string: workspace.title)
+                input.placeholderString = String(localized: "alert.nameWorkspace.placeholder", defaultValue: "Workspace name")
+                input.frame = NSRect(x: 0, y: 0, width: 240, height: 22)
+                alert.accessoryView = input
+                alert.addButton(withTitle: String(localized: "alert.nameWorkspace.confirm", defaultValue: "Confirm"))
+                alert.addButton(withTitle: String(localized: "alert.nameWorkspace.cancel", defaultValue: "Cancel"))
+                alert.window.initialFirstResponder = input
+                alert.beginSheetModal(for: window) { response in
+                    guard response == .alertFirstButtonReturn else { return }
+                    tabManager.setCustomTitle(tabId: workspaceId, title: input.stringValue)
+                }
+                // Sheet is now attached — focus the input after the sheet animates in.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    alert.window.makeFirstResponder(input)
+                    input.currentEditor()?.selectAll(nil)
+                }
+            }
+        }
     }
 
     private func debugShortSidebarTabId(_ id: UUID?) -> String {
@@ -11173,7 +11445,7 @@ private struct TabItemView: View, Equatable {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(remoteWorkspaceSidebarText)
-                        .font(.system(size: 10, design: .monospaced))
+                        .font(.system(size: 11, design: .monospaced))
                         .foregroundColor(activeSecondaryColor(0.8))
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -11181,7 +11453,7 @@ private struct TabItemView: View, Equatable {
                     Spacer(minLength: 0)
 
                     Text(remoteConnectionStatusText)
-                        .font(.system(size: 9, weight: .medium))
+                        .font(.system(size: 9.9, weight: .medium))
                         .foregroundColor(activeSecondaryColor(0.58))
                         .lineLimit(1)
                 }
@@ -11262,6 +11534,14 @@ private struct TabItemView: View, Equatable {
             guard detailVisibility.showsPullRequests, let orderedPanelIds else { return [] }
             return pullRequestDisplays(orderedPanelIds: orderedPanelIds)
         }()
+        let inlineBranchSummary: String? = {
+            // Only show worktree name from set_status (immune to shell integration overwrites)
+            if let worktreeEntry = tab.statusEntries["worktree"],
+               !worktreeEntry.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return worktreeEntry.value.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            return nil
+        }()
 
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
@@ -11270,7 +11550,7 @@ private struct TabItemView: View, Equatable {
                         Circle()
                             .fill(activeUnreadBadgeFillColor)
                         Text("\(unreadCount)")
-                            .font(.system(size: 9, weight: .semibold))
+                            .font(.system(size: 9.9, weight: .semibold))
                             .foregroundColor(.white)
                     }
                     .frame(width: 16, height: 16)
@@ -11278,13 +11558,13 @@ private struct TabItemView: View, Equatable {
 
                 if tab.isPinned {
                     Image(systemName: "pin.fill")
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(.system(size: 9.9, weight: .semibold))
                         .foregroundColor(activeSecondaryColor(0.8))
                         .safeHelp(protectedWorkspaceTooltip)
                 }
 
                 Text(tab.title)
-                    .font(.system(size: 12.5, weight: titleFontWeight))
+                    .font(.system(size: 13.75, weight: titleFontWeight))
                     .foregroundColor(activePrimaryTextColor)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -11300,7 +11580,7 @@ private struct TabItemView: View, Equatable {
                         tabManager.closeWorkspaceWithConfirmation(tab)
                     }) {
                         Image(systemName: "xmark")
-                            .font(.system(size: 9, weight: .medium))
+                            .font(.system(size: 9.9, weight: .medium))
                             .foregroundColor(activeSecondaryColor(0.7))
                     }
                     .buttonStyle(.plain)
@@ -11313,7 +11593,7 @@ private struct TabItemView: View, Equatable {
                         Text(workspaceShortcutLabel)
                             .lineLimit(1)
                             .fixedSize(horizontal: true, vertical: false)
-                            .font(.system(size: 10, weight: .semibold, design: .rounded))
+                            .font(.system(size: 11, weight: .semibold, design: .rounded))
                             .monospacedDigit()
                             .foregroundColor(activePrimaryTextColor)
                             .padding(.horizontal, 6)
@@ -11332,17 +11612,41 @@ private struct TabItemView: View, Equatable {
 
             if let subtitle = effectiveSubtitle {
                 Text(subtitle)
-                    .font(.system(size: 10))
+                    .font(.system(size: 11))
                     .foregroundColor(activeSecondaryColor(0.8))
                     .lineLimit(2)
                     .truncationMode(.tail)
                     .multilineTextAlignment(.leading)
             }
 
+            if let inlineBranchSummary {
+                let pillColor: Color = {
+                    if let hex = tab.customColor, let c = Color(hex: hex) {
+                        return c
+                    }
+                    return Color.white.opacity(0.12)
+                }()
+                HStack {
+                    Spacer(minLength: 0)
+                    Text(inlineBranchSummary)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(
+                            Capsule(style: .continuous)
+                                .fill(pillColor)
+                        )
+                        .padding(.trailing, 4)
+                }
+            }
+
             remoteWorkspaceSection
 
             if detailVisibility.showsMetadata {
-                let metadataEntries = tab.sidebarStatusEntriesInDisplayOrder()
+                let metadataEntries = tab.sidebarStatusEntriesInDisplayOrder().filter { $0.key != "worktree" }
                 let metadataBlocks = tab.sidebarMetadataBlocksInDisplayOrder()
                 if !metadataEntries.isEmpty {
                     SidebarMetadataRows(
@@ -11366,10 +11670,10 @@ private struct TabItemView: View, Equatable {
             if detailVisibility.showsLog, let latestLog = tab.logEntries.last {
                 HStack(spacing: 4) {
                     Image(systemName: logLevelIcon(latestLog.level))
-                        .font(.system(size: 8))
+                        .font(.system(size: 8.8))
                         .foregroundColor(logLevelColor(latestLog.level, isActive: usesInvertedActiveForeground))
                     Text(latestLog.message)
-                        .font(.system(size: 10))
+                        .font(.system(size: 11))
                         .foregroundColor(activeSecondaryColor(0.8))
                         .lineLimit(1)
                         .truncationMode(.tail)
@@ -11393,66 +11697,12 @@ private struct TabItemView: View, Equatable {
 
                     if let label = progress.label {
                         Text(label)
-                            .font(.system(size: 9))
+                            .font(.system(size: 9.9))
                             .foregroundColor(activeSecondaryColor(0.6))
                             .lineLimit(1)
                     }
                 }
                 .transition(.opacity.combined(with: .move(edge: .top)))
-            }
-
-            // Branch + directory row
-            if detailVisibility.showsBranchDirectory {
-                if sidebarBranchVerticalLayout {
-                    if !branchDirectoryLines.isEmpty {
-                        HStack(alignment: .top, spacing: 3) {
-                            if sidebarShowGitBranchIcon, branchLinesContainBranch {
-                                Image(systemName: "arrow.triangle.branch")
-                                    .font(.system(size: 9))
-                                    .foregroundColor(activeSecondaryColor(0.6))
-                            }
-                            VStack(alignment: .leading, spacing: 1) {
-                                ForEach(Array(branchDirectoryLines.enumerated()), id: \.offset) { _, line in
-                                    HStack(spacing: 3) {
-                                        if let branch = line.branch {
-                                            Text(branch)
-                                                .font(.system(size: 10, design: .monospaced))
-                                                .foregroundColor(activeSecondaryColor(0.75))
-                                                .lineLimit(1)
-                                                .truncationMode(.tail)
-                                        }
-                                        if line.branch != nil, line.directory != nil {
-                                            Image(systemName: "circle.fill")
-                                                .font(.system(size: 3))
-                                                .foregroundColor(activeSecondaryColor(0.6))
-                                                .padding(.horizontal, 1)
-                                        }
-                                        if let directory = line.directory {
-                                            Text(directory)
-                                                .font(.system(size: 10, design: .monospaced))
-                                                .foregroundColor(activeSecondaryColor(0.75))
-                                                .lineLimit(1)
-                                                .truncationMode(.tail)
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } else if let dirRow = compactBranchDirectoryRow {
-                    HStack(spacing: 3) {
-                        if sidebarShowGitBranchIcon, compactGitBranchSummaryText != nil {
-                            Image(systemName: "arrow.triangle.branch")
-                                .font(.system(size: 9))
-                                .foregroundColor(activeSecondaryColor(0.6))
-                        }
-                        Text(dirRow)
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundColor(activeSecondaryColor(0.75))
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                    }
-                }
             }
 
             // Pull request rows
@@ -11475,7 +11725,7 @@ private struct TabItemView: View, Equatable {
                                     .lineLimit(1)
                                 Spacer(minLength: 0)
                             }
-                            .font(.system(size: 10, weight: .semibold))
+                            .font(.system(size: 11, weight: .semibold))
                             .foregroundColor(pullRequestForegroundColor)
                         }
                         .buttonStyle(.plain)
@@ -11487,7 +11737,7 @@ private struct TabItemView: View, Equatable {
             // Ports row
             if detailVisibility.showsPorts, !tab.listeningPorts.isEmpty {
                 Text(tab.listeningPorts.map { ":\($0)" }.joined(separator: ", "))
-                    .font(.system(size: 10, design: .monospaced))
+                    .font(.system(size: 11, design: .monospaced))
                     .foregroundColor(activeSecondaryColor(0.75))
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -11496,7 +11746,8 @@ private struct TabItemView: View, Equatable {
         .animation(.easeInOut(duration: 0.2), value: tab.logEntries.count)
         .animation(.easeInOut(duration: 0.2), value: tab.progress != nil)
         .animation(.easeInOut(duration: 0.2), value: tab.metadataBlocks.count)
-        .padding(.horizontal, 10)
+        .padding(.leading, 15)
+        .padding(.trailing, 10)
         .padding(.vertical, 8)
         .background(
             RoundedRectangle(cornerRadius: 6)
@@ -11509,7 +11760,7 @@ private struct TabItemView: View, Equatable {
                     if showsLeadingRail {
                         Capsule(style: .continuous)
                             .fill(railColor)
-                            .frame(width: 3)
+                            .frame(width: 4.5)
                             .padding(.leading, 4)
                             .padding(.vertical, 5)
                             .offset(x: -1)
@@ -12451,7 +12702,7 @@ private struct SidebarMetadataRows: View {
                     }
                 }
                 .buttonStyle(.plain)
-                .font(.system(size: 10, weight: .semibold))
+                .font(.system(size: 11, weight: .semibold))
                 .foregroundColor(isActive ? activeSecondaryTextColor : .secondary.opacity(0.9))
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -12517,7 +12768,7 @@ private struct SidebarMetadataEntryRow: View {
                 .truncationMode(.tail)
             Spacer(minLength: 0)
         }
-        .font(.system(size: 10))
+        .font(.system(size: 11))
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
@@ -12541,12 +12792,12 @@ private struct SidebarMetadataEntryRow: View {
         if iconRaw.hasPrefix("emoji:") {
             let value = String(iconRaw.dropFirst("emoji:".count))
             guard !value.isEmpty else { return nil }
-            return AnyView(Text(value).font(.system(size: 9)))
+            return AnyView(Text(value).font(.system(size: 9.9)))
         }
         if iconRaw.hasPrefix("text:") {
             let value = String(iconRaw.dropFirst("text:".count))
             guard !value.isEmpty else { return nil }
-            return AnyView(Text(value).font(.system(size: 8, weight: .semibold)))
+            return AnyView(Text(value).font(.system(size: 8.8, weight: .semibold)))
         }
         let symbolName: String
         if iconRaw.hasPrefix("sf:") {
@@ -12555,7 +12806,7 @@ private struct SidebarMetadataEntryRow: View {
             symbolName = iconRaw
         }
         guard !symbolName.isEmpty else { return nil }
-        return AnyView(Image(systemName: symbolName).font(.system(size: 8, weight: .medium)))
+        return AnyView(Image(systemName: symbolName).font(.system(size: 8.8, weight: .medium)))
     }
 
     @ViewBuilder
@@ -12604,7 +12855,7 @@ private struct SidebarMetadataMarkdownBlocks: View {
                     }
                 }
                 .buttonStyle(.plain)
-                .font(.system(size: 10, weight: .semibold))
+                .font(.system(size: 11, weight: .semibold))
                 .foregroundColor(isActive ? .white.opacity(0.65) : .secondary.opacity(0.9))
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -12638,7 +12889,7 @@ private struct SidebarMetadataMarkdownBlockRow: View {
                     .foregroundColor(foregroundColor)
             }
         }
-        .font(.system(size: 10))
+        .font(.system(size: 11))
         .multilineTextAlignment(.leading)
         .fixedSize(horizontal: false, vertical: true)
         .contentShape(Rectangle())

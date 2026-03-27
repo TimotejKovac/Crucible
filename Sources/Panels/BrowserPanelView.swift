@@ -320,6 +320,7 @@ struct BrowserPanelView: View {
     @State private var pendingAddressBarFocusRetryGeneration: UInt64 = 0
     @State private var isBrowserProfileMenuPresented = false
     @State private var isBrowserThemeMenuPresented = false
+    @State private var isViewportDeviceMenuPresented = false
     @State private var browserChromeStyle = BrowserChromeStyle.resolve(
         for: .light,
         themeBackgroundColor: GhosttyBackgroundTheme.currentColor()
@@ -331,7 +332,7 @@ struct BrowserPanelView: View {
     private let addressBarButtonSize: CGFloat = 22
     private let addressBarButtonHitSize: CGFloat = 26
     private let addressBarVerticalPadding: CGFloat = 4
-    private let devToolsButtonIconSize: CGFloat = 11
+    private let devToolsButtonIconSize: CGFloat = 13.2
 
     private var searchEngine: BrowserSearchEngine {
         BrowserSearchEngine(rawValue: searchEngineRaw) ?? BrowserSearchSettings.defaultSearchEngine
@@ -447,7 +448,7 @@ struct BrowserPanelView: View {
         VStack(spacing: 0) {
             addressBar
                 .fixedSize(horizontal: false, vertical: true)
-            webView
+            viewportConstrainedWebView
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .overlay {
@@ -732,6 +733,21 @@ struct BrowserPanelView: View {
                 if shouldShowToolbarImportHintChip {
                     browserImportHintToolbarChip
                 }
+                browserMuteButton
+
+                Rectangle()
+                    .fill(Color.primary.opacity(0.15))
+                    .frame(width: 1, height: 14)
+                    .padding(.horizontal, 4)
+
+                viewportDeviceButton
+                viewportLandscapeToggle
+
+                Rectangle()
+                    .fill(Color.primary.opacity(0.15))
+                    .frame(width: 1, height: 14)
+                    .padding(.horizontal, 4)
+
                 browserProfileButton
                 browserThemeModeButton
                 developerToolsButton
@@ -894,6 +910,118 @@ struct BrowserPanelView: View {
             )
         )
         .accessibilityIdentifier("BrowserThemeModeButton")
+    }
+
+    private var browserMuteButton: some View {
+        Button(action: {
+            panel.toggleAudioMuted()
+        }) {
+            Image(systemName: panel.isAudioMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                .symbolRenderingMode(.monochrome)
+                .cmuxFlatSymbolColorRendering()
+                .font(.system(size: devToolsButtonIconSize, weight: .medium))
+                .foregroundStyle(panel.isAudioMuted ? .red : devToolsColorOption.color)
+                .frame(width: addressBarButtonSize, height: addressBarButtonSize, alignment: .center)
+        }
+        .buttonStyle(OmnibarAddressButtonStyle())
+        .frame(width: addressBarButtonSize, height: addressBarButtonSize, alignment: .center)
+        .safeHelp(
+            panel.isAudioMuted
+                ? String(localized: "browser.mute.unmute", defaultValue: "Unmute Audio")
+                : String(localized: "browser.mute.mute", defaultValue: "Mute Audio")
+        )
+        .accessibilityIdentifier("BrowserMuteButton")
+    }
+
+    private var viewportDeviceButton: some View {
+        Button(action: {
+            isViewportDeviceMenuPresented.toggle()
+        }) {
+            Image(systemName: panel.viewportDevicePreset.iconName)
+                .symbolRenderingMode(.monochrome)
+                .cmuxFlatSymbolColorRendering()
+                .font(.system(size: devToolsButtonIconSize, weight: .medium))
+                .foregroundStyle(panel.viewportDevicePreset.isResponsive ? devToolsColorOption.color : .accentColor)
+                .frame(width: addressBarButtonSize, height: addressBarButtonSize, alignment: .center)
+        }
+        .buttonStyle(OmnibarAddressButtonStyle())
+        .frame(width: addressBarButtonSize, height: addressBarButtonSize, alignment: .center)
+        .popover(isPresented: $isViewportDeviceMenuPresented, arrowEdge: .bottom) {
+            viewportDevicePopover
+        }
+        .safeHelp(
+            String(
+                format: String(localized: "browser.viewport.buttonHelp", defaultValue: "Device Viewport: %@"),
+                panel.viewportDevicePreset.displayName
+            )
+        )
+        .accessibilityIdentifier("BrowserViewportDeviceButton")
+    }
+
+    private var viewportLandscapeToggle: some View {
+        Button(action: {
+            panel.toggleViewportLandscape()
+        }) {
+            Image(systemName: "rectangle.landscape.rotate")
+                .symbolRenderingMode(.monochrome)
+                .cmuxFlatSymbolColorRendering()
+                .font(.system(size: devToolsButtonIconSize, weight: .medium))
+                .foregroundStyle(panel.viewportLandscape ? .accentColor : devToolsColorOption.color)
+                .frame(width: addressBarButtonSize, height: addressBarButtonSize, alignment: .center)
+        }
+        .buttonStyle(OmnibarAddressButtonStyle())
+        .frame(width: addressBarButtonSize, height: addressBarButtonSize, alignment: .center)
+        .safeHelp(
+            panel.viewportLandscape
+                ? String(localized: "browser.viewport.portrait", defaultValue: "Switch to Portrait")
+                : String(localized: "browser.viewport.landscape", defaultValue: "Switch to Landscape")
+        )
+        .opacity(panel.viewportDevicePreset.isResponsive ? 0.3 : 1.0)
+        .disabled(panel.viewportDevicePreset.isResponsive)
+        .accessibilityIdentifier("BrowserViewportLandscapeToggle")
+    }
+
+    private var viewportDevicePopover: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            ForEach(BrowserDevicePresets.all) { preset in
+                Button {
+                    panel.setViewportDevicePreset(preset)
+                    isViewportDeviceMenuPresented = false
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: preset.id == panel.viewportDevicePreset.id ? "checkmark" : "circle")
+                            .font(.system(size: 10, weight: .semibold))
+                            .opacity(preset.id == panel.viewportDevicePreset.id ? 1.0 : 0.0)
+                            .frame(width: 12, alignment: .center)
+                        Image(systemName: preset.iconName)
+                            .font(.system(size: 11))
+                            .frame(width: 16, alignment: .center)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(preset.displayName)
+                                .font(.system(size: 12))
+                            if !preset.isResponsive {
+                                let size = preset.effectiveSize(landscape: panel.viewportLandscape)
+                                Text("\(Int(size.width)) × \(Int(size.height))")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 8)
+                    .frame(minHeight: 28)
+                    .contentShape(Rectangle())
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(preset.id == panel.viewportDevicePreset.id ? Color.primary.opacity(0.12) : Color.clear)
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+
+        }
+        .padding(8)
+        .frame(minWidth: 200)
     }
 
     private var browserImportHintToolbarChip: some View {
@@ -1106,6 +1234,48 @@ struct BrowserPanelView: View {
                         key: OmnibarPillFramePreferenceKey.self,
                         value: geo.frame(in: .named("BrowserPanelViewSpace"))
                     )
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var viewportConstrainedWebView: some View {
+        let preset = panel.viewportDevicePreset
+        if preset.isResponsive {
+            webView
+        } else {
+            let size = preset.effectiveSize(landscape: panel.viewportLandscape)
+            GeometryReader { geo in
+                let scale = min(
+                    geo.size.width / size.width,
+                    geo.size.height / size.height,
+                    1.0
+                )
+                let scaledWidth = size.width * scale
+                let scaledHeight = size.height * scale
+
+                ZStack {
+                    Color(nsColor: .controlBackgroundColor).opacity(0.5)
+
+                    webView
+                        .frame(width: scaledWidth, height: scaledHeight)
+                        .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                .stroke(Color.primary.opacity(0.15), lineWidth: 1)
+                        )
+                        .shadow(color: .black.opacity(0.1), radius: 8, y: 2)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .overlay(alignment: .bottom) {
+                    Text("\(Int(size.width)) × \(Int(size.height))")
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 4))
+                        .padding(.bottom, 8)
+                }
             }
         }
     }

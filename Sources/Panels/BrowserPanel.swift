@@ -880,6 +880,77 @@ enum BrowserUserAgentSettings {
     static let safariUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.2 Safari/605.1.15"
 }
 
+struct BrowserDevicePreset: Identifiable, Hashable {
+    let id: String
+    let displayName: String
+    let width: CGFloat
+    let height: CGFloat
+    let userAgent: String
+    let iconName: String
+
+    var isResponsive: Bool { width <= 0 || height <= 0 }
+
+    func effectiveSize(landscape: Bool) -> (width: CGFloat, height: CGFloat) {
+        guard !isResponsive else { return (0, 0) }
+        if landscape {
+            return (max(width, height), min(width, height))
+        }
+        return (min(width, height), max(width, height))
+    }
+}
+
+enum BrowserDevicePresets {
+    static let responsive = BrowserDevicePreset(
+        id: "responsive",
+        displayName: String(localized: "browser.device.responsive", defaultValue: "Responsive"),
+        width: 0, height: 0,
+        userAgent: BrowserUserAgentSettings.safariUserAgent,
+        iconName: "arrow.up.left.and.arrow.down.right"
+    )
+
+    static let unity = BrowserDevicePreset(
+        id: "unity", displayName: "Unity",
+        width: 2400, height: 1400,
+        userAgent: BrowserUserAgentSettings.safariUserAgent,
+        iconName: "ipad.landscape"
+    )
+
+    static let all: [BrowserDevicePreset] = [
+        responsive,
+        unity,
+        BrowserDevicePreset(
+            id: "iphone15pro", displayName: "iPhone 15 Pro",
+            width: 393, height: 852,
+            userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
+            iconName: "iphone"
+        ),
+        BrowserDevicePreset(
+            id: "iphonese", displayName: "iPhone SE",
+            width: 375, height: 667,
+            userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
+            iconName: "iphone.gen1"
+        ),
+        BrowserDevicePreset(
+            id: "ipadpro", displayName: "iPad Pro 12.9\"",
+            width: 1024, height: 1366,
+            userAgent: "Mozilla/5.0 (iPad; CPU OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
+            iconName: "ipad"
+        ),
+        BrowserDevicePreset(
+            id: "galaxys24", displayName: "Galaxy S24",
+            width: 360, height: 780,
+            userAgent: "Mozilla/5.0 (Linux; Android 14; SM-S921B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
+            iconName: "iphone"
+        ),
+        BrowserDevicePreset(
+            id: "galaxytab", displayName: "Galaxy Tab S9",
+            width: 800, height: 1280,
+            userAgent: "Mozilla/5.0 (Linux; Android 14; SM-X710) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            iconName: "ipad.landscape"
+        ),
+    ]
+}
+
 func normalizedBrowserHistoryNamespace(bundleIdentifier: String) -> String {
     if bundleIdentifier.hasPrefix("com.cmuxterm.app.debug.") {
         return "com.cmuxterm.app.debug"
@@ -2145,6 +2216,13 @@ final class BrowserPanel: Panel, ObservableObject {
 
     /// Published estimated progress (0.0 - 1.0)
     @Published private(set) var estimatedProgress: Double = 0.0
+
+    /// Whether audio is muted for this browser panel.
+    @Published private(set) var isAudioMuted: Bool = false
+
+    /// Current device viewport preset for responsive design simulation.
+    @Published private(set) var viewportDevicePreset: BrowserDevicePreset = BrowserDevicePresets.unity
+    @Published private(set) var viewportLandscape: Bool = false
 
     /// Increment to request a UI-only flash highlight (e.g. from a keyboard shortcut).
     @Published private(set) var focusFlashToken: Int = 0
@@ -4875,6 +4953,28 @@ extension BrowserPanel {
     func setBrowserThemeMode(_ mode: BrowserThemeMode) {
         browserThemeMode = mode
         applyBrowserThemeModeIfNeeded()
+    }
+
+    func setViewportDevicePreset(_ preset: BrowserDevicePreset) {
+        viewportDevicePreset = preset
+        webView.customUserAgent = preset.userAgent
+        webView.reload()
+    }
+
+    func toggleViewportLandscape() {
+        viewportLandscape.toggle()
+    }
+
+    func toggleAudioMuted() {
+        isAudioMuted.toggle()
+        if #available(macOS 14.0, *) {
+            webView.setAllMediaPlaybackSuspended(isAudioMuted)
+        } else {
+            let js = isAudioMuted
+                ? "document.querySelectorAll('video,audio').forEach(e=>{e.muted=true})"
+                : "document.querySelectorAll('video,audio').forEach(e=>{e.muted=false})"
+            webView.evaluateJavaScript(js, completionHandler: nil)
+        }
     }
 
     func refreshAppearanceDrivenColors() {

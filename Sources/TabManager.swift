@@ -700,6 +700,12 @@ class TabManager: ObservableObject {
     private static let initialWorkspaceGitProbeDelays: [TimeInterval] = [0, 0.5, 1.5, 3.0, 6.0, 10.0]
     private static let workspaceGitMetadataPollInterval: TimeInterval = 30
     private nonisolated static let workspacePullRequestProbeTimeout: TimeInterval = 5.0
+    /// Auto-incrementing workspace number for default naming.
+    private var nextWorkspaceNumber: Int = 1
+
+    /// Set after creating a workspace that should immediately show the rename dialog.
+    @Published var pendingRenameWorkspaceId: UUID?
+
     @Published var selectedTabId: UUID? {
         willSet {
 #if DEBUG
@@ -1225,8 +1231,10 @@ class TabManager: ObservableObject {
         let insertIndex = newTabInsertIndex(snapshot: snapshot, placementOverride: placementOverride)
         let ordinal = Self.nextPortOrdinal
         Self.nextPortOrdinal += 1
+        let workspaceNumber = nextWorkspaceNumber
+        nextWorkspaceNumber += 1
         let newWorkspace = makeWorkspaceForCreation(
-            title: "Terminal \(nextTabCount)",
+            title: "Workspace #\(workspaceNumber)",
             workingDirectory: workingDirectory,
             portOrdinal: ordinal,
             configTemplate: inheritedConfig,
@@ -1234,6 +1242,30 @@ class TabManager: ObservableObject {
             initialTerminalEnvironment: initialTerminalEnvironment
         )
         newWorkspace.owningTabManager = self
+        // Auto-assign a color in a fixed rotation, skipping colors already in use.
+        do {
+            let colorRotation = [
+                "#C0392B", // Red
+                "#7D6608", // Amber (yellow)
+                "#1565C0", // Blue
+                "#196F3D", // Green
+                "#A04000", // Orange
+                "#6A1B9A", // Purple
+                "#006B6B", // Teal
+                "#AD1457", // Magenta
+                "#1A5276", // Navy
+                "#4A5C18", // Olive
+                "#922B21", // Crimson
+                "#0E6B8C", // Aqua
+                "#283593", // Indigo
+                "#880E4F", // Rose
+                "#7B3F00", // Brown
+                "#3E4B5E", // Charcoal
+            ]
+            let usedColors = Set(tabs.compactMap { $0.customColor })
+            let next = colorRotation.first { !usedColors.contains($0) } ?? colorRotation[tabs.count % colorRotation.count]
+            newWorkspace.setCustomColor(next)
+        }
         wireClosedBrowserTracking(for: newWorkspace)
         if eagerLoadTerminal && !select {
             requestBackgroundWorkspaceLoad(for: newWorkspace.id)
@@ -1270,6 +1302,10 @@ class TabManager: ObservableObject {
                 object: nil,
                 userInfo: [GhosttyNotificationKey.tabId: newWorkspace.id]
             )
+        }
+        // Prompt rename for all workspaces except the very first one.
+        if snapshot.tabs.count > 0 {
+            pendingRenameWorkspaceId = newWorkspace.id
         }
 #if DEBUG
         UITestRecorder.incrementInt("addTabInvocations")
