@@ -887,6 +887,7 @@ struct BrowserDevicePreset: Identifiable, Hashable {
     let height: CGFloat
     let userAgent: String
     let iconName: String
+    let devicePixelRatio: Double
 
     var isResponsive: Bool { width <= 0 || height <= 0 }
 
@@ -905,14 +906,16 @@ enum BrowserDevicePresets {
         displayName: String(localized: "browser.device.responsive", defaultValue: "Responsive"),
         width: 0, height: 0,
         userAgent: BrowserUserAgentSettings.safariUserAgent,
-        iconName: "arrow.up.left.and.arrow.down.right"
+        iconName: "arrow.up.left.and.arrow.down.right",
+        devicePixelRatio: 0 // use native
     )
 
     static let unity = BrowserDevicePreset(
         id: "unity", displayName: "Unity",
         width: 2400, height: 1400,
         userAgent: BrowserUserAgentSettings.safariUserAgent,
-        iconName: "ipad.landscape"
+        iconName: "ipad.landscape",
+        devicePixelRatio: 1.0
     )
 
     static let all: [BrowserDevicePreset] = [
@@ -922,31 +925,36 @@ enum BrowserDevicePresets {
             id: "iphone15pro", displayName: "iPhone 15 Pro",
             width: 393, height: 852,
             userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
-            iconName: "iphone"
+            iconName: "iphone",
+            devicePixelRatio: 3.0
         ),
         BrowserDevicePreset(
             id: "iphonese", displayName: "iPhone SE",
             width: 375, height: 667,
             userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
-            iconName: "iphone.gen1"
+            iconName: "iphone.gen1",
+            devicePixelRatio: 2.0
         ),
         BrowserDevicePreset(
             id: "ipadpro", displayName: "iPad Pro 12.9\"",
             width: 1024, height: 1366,
             userAgent: "Mozilla/5.0 (iPad; CPU OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
-            iconName: "ipad"
+            iconName: "ipad",
+            devicePixelRatio: 2.0
         ),
         BrowserDevicePreset(
             id: "galaxys24", displayName: "Galaxy S24",
             width: 360, height: 780,
             userAgent: "Mozilla/5.0 (Linux; Android 14; SM-S921B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
-            iconName: "iphone"
+            iconName: "iphone",
+            devicePixelRatio: 3.0
         ),
         BrowserDevicePreset(
             id: "galaxytab", displayName: "Galaxy Tab S9",
             width: 800, height: 1280,
             userAgent: "Mozilla/5.0 (Linux; Android 14; SM-X710) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-            iconName: "ipad.landscape"
+            iconName: "ipad.landscape",
+            devicePixelRatio: 2.0
         ),
     ]
 }
@@ -2668,6 +2676,11 @@ final class BrowserPanel: Panel, ObservableObject {
         )
         self.webView = webView
         self.insecureHTTPAlertFactory = { NSAlert() }
+        // Apply initial device preset (UA + __crucible_device global).
+        if !viewportDevicePreset.isResponsive {
+            webView.customUserAgent = viewportDevicePreset.userAgent
+        }
+        applyCrucibleDeviceGlobal(viewportDevicePreset)
         applyRemoteProxyConfigurationIfAvailable()
         BrowserProfileStore.shared.noteUsed(resolvedProfileID)
 
@@ -4958,11 +4971,50 @@ extension BrowserPanel {
     func setViewportDevicePreset(_ preset: BrowserDevicePreset) {
         viewportDevicePreset = preset
         webView.customUserAgent = preset.userAgent
+        applyCrucibleDeviceGlobal(preset)
         webView.reload()
+    }
+
+    private func applyCrucibleDeviceGlobal(_ preset: BrowserDevicePreset) {
+        let controller = webView.configuration.userContentController
+        let existingScripts = controller.userScripts.filter {
+            !$0.source.contains("__crucible_device_inject__")
+        }
+        controller.removeAllUserScripts()
+        for script in existingScripts {
+            controller.addUserScript(script)
+        }
+
+        let js: String
+        if preset.isResponsive {
+            js = """
+            // __crucible_device_inject__
+            window.__crucible_device = null;
+            """
+        } else {
+            js = """
+            // __crucible_device_inject__
+            window.__crucible_device = {
+                id: "\(preset.id)",
+                name: "\(preset.displayName)",
+                width: \(Int(preset.width)),
+                height: \(Int(preset.height)),
+                dpr: \(preset.devicePixelRatio),
+                landscape: \(viewportLandscape)
+            };
+            """
+        }
+        let script = WKUserScript(
+            source: js,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: false
+        )
+        controller.addUserScript(script)
     }
 
     func toggleViewportLandscape() {
         viewportLandscape.toggle()
+        applyCrucibleDeviceGlobal(viewportDevicePreset)
     }
 
     func toggleAudioMuted() {
