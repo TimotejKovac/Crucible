@@ -1787,6 +1787,24 @@ final class BrowserPortalAnchorView: NSView {
 }
 
 @MainActor
+/// Receives messages from the Crucible JS bridge (window.webkit.messageHandlers.crucible).
+final class CrucibleScriptMessageHandler: NSObject, WKScriptMessageHandler {
+    private let onMessage: (Any) -> Void
+
+    init(onMessage: @escaping (Any) -> Void) {
+        self.onMessage = onMessage
+    }
+
+    func userContentController(
+        _ userContentController: WKUserContentController,
+        didReceive message: WKScriptMessage
+    ) {
+        DispatchQueue.main.async { [weak self] in
+            self?.onMessage(message.body)
+        }
+    }
+}
+
 final class BrowserPanel: Panel, ObservableObject {
     private static let remoteLoopbackProxyAliasHost = "cmux-loopback.localtest.me"
     private static let remoteLoopbackHosts: Set<String> = [
@@ -2552,6 +2570,22 @@ final class BrowserPanel: Panel, ObservableObject {
         return webView
     }
 
+    private func handleCrucibleMessage(_ body: Any) {
+        guard let dict = body as? [String: Any],
+              let action = dict["action"] as? String else { return }
+
+        switch action {
+        case "setOrientation":
+            if let landscape = dict["landscape"] as? Bool,
+               landscape != viewportLandscape {
+                viewportLandscape.toggle()
+                applyCrucibleDeviceGlobal(viewportDevicePreset)
+            }
+        default:
+            break
+        }
+    }
+
     static func configureWebViewConfiguration(
         _ configuration: WKWebViewConfiguration,
         websiteDataStore: WKWebsiteDataStore,
@@ -2592,7 +2626,17 @@ final class BrowserPanel: Panel, ObservableObject {
         )
     }
 
+    /// Message handler for the Crucible JS bridge (window.webkit.messageHandlers.crucible).
+    private var crucibleMessageHandler: CrucibleScriptMessageHandler?
+
     private func bindWebView(_ webView: CmuxWebView) {
+        // Register the Crucible JS→Swift bridge.
+        let handler = CrucibleScriptMessageHandler { [weak self] message in
+            self?.handleCrucibleMessage(message)
+        }
+        crucibleMessageHandler = handler
+        webView.configuration.userContentController.add(handler, name: "crucible")
+
         webView.onContextMenuDownloadStateChanged = { [weak self] downloading in
             if downloading {
                 self?.beginDownloadActivity()
