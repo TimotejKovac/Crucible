@@ -51,6 +51,32 @@ final class MenuKeyEquivalentRoutingUITests: XCTestCase {
         )
     }
 
+    func testCmdNWorksWhenBrowserAddressBarFocused() {
+        let app = launchWithBrowserSetup()
+
+        app.typeKey("l", modifierFlags: [.command])
+
+        let omnibar = app.textFields["BrowserOmnibarTextField"].firstMatch
+        XCTAssertTrue(omnibar.waitForExistence(timeout: 6.0), "Expected browser omnibar after Cmd+L")
+
+        let marker = "cmdn-\(UUID().uuidString.prefix(8))"
+        app.typeText(marker)
+        XCTAssertTrue(
+            waitForCondition(timeout: 5.0) {
+                ((omnibar.value as? String) ?? "").contains(marker)
+            },
+            "Expected Cmd+L to focus browser omnibar before Cmd+N. value=\(String(describing: omnibar.value))"
+        )
+
+        let baseline = loadKeyequiv()["addTabInvocations"].flatMap(Int.init) ?? 0
+        app.typeKey("n", modifierFlags: [.command])
+
+        XCTAssertTrue(
+            waitForKeyequivInt(key: "addTabInvocations", toBeAtLeast: baseline + 1, timeout: 5.0),
+            "Expected Cmd+N to reach app menu and create a new tab even when browser omnibar is first responder"
+        )
+    }
+
     func testCmdWWorksWhenWebViewFocusedAfterTabSwitch() {
         let app = launchWithBrowserSetup()
 
@@ -89,18 +115,394 @@ final class MenuKeyEquivalentRoutingUITests: XCTestCase {
         )
     }
 
-    private func launchWithBrowserSetup() -> XCUIApplication {
-        let app = XCUIApplication()
+    func testCmdFOpensRightSidebarFindInsteadOfWebContentFindShortcut() {
+        let app = launchWithBrowserSetup(browserURL: makeBrowserHandledCmdFPageURL())
+
+        XCTAssertTrue(
+            waitForGotoSplitMatch(timeout: 10.0) { data in
+                data["browserPageTitle"] == "cmdf-pending"
+            },
+            "Expected the browser test page to finish loading before Cmd+F"
+        )
+
+        app.typeKey("f", modifierFlags: [.command])
+
+        let findField = app.textFields["FileExplorerSearchField"].firstMatch
+        XCTAssertTrue(findField.waitForExistence(timeout: 6.0), "Expected right sidebar file search after Cmd+F")
+
+        app.typeText("needle")
+        XCTAssertTrue(
+            waitForCondition(timeout: 4.0) {
+                ((findField.value as? String) ?? "") == "needle"
+            },
+            "Expected Cmd+F to focus right sidebar file search. value=\(String(describing: findField.value))"
+        )
+        XCTAssertNotEqual(
+            loadGotoSplit()?["browserPageTitle"],
+            "cmdf-handled",
+            "Expected Cmd+F to stay out of browser page content. data=\(loadGotoSplit() ?? [:])"
+        )
+    }
+
+    func testBrowserFirstFindShortcutDoesNotReplayUnclaimedCmdEIntoWebContentTwice() {
+        let app = launchWithBrowserSetup(browserURL: makeBrowserObservedCmdEPageURL())
+
+        XCTAssertTrue(
+            waitForGotoSplitMatch(timeout: 10.0) { data in
+                data["browserPageTitle"] == "cmde-0"
+            },
+            "Expected the Cmd+E test page to finish loading before the shortcut. data=\(loadGotoSplit() ?? [:])"
+        )
+
+        app.typeKey("e", modifierFlags: [.command])
+
+        XCTAssertTrue(
+            waitForGotoSplitMatch(timeout: 5.0) { data in
+                data["browserPageTitle"] == "cmde-1"
+            },
+            "Expected Cmd+E to reach browser content exactly once. data=\(loadGotoSplit() ?? [:])"
+        )
+
+        RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+        XCTAssertEqual(
+            loadGotoSplit()?["browserPageTitle"],
+            "cmde-1",
+            "Expected Cmd+E to avoid a second WebKit replay. data=\(loadGotoSplit() ?? [:])"
+        )
+    }
+
+    func testBrowserLocalFindShortcutsStillReachWebContentWhenBrowserFindBarIsHidden() {
+        let app = launchWithBrowserSetup(browserURL: makeVisibleBrowserFindOwnershipPageURL())
+
+        XCTAssertTrue(
+            waitForGotoSplitMatch(timeout: 10.0) { data in
+                data["browserPageTitle"] == "find-owner-idle"
+            },
+            "Expected the browser find ownership page to finish loading before opening find. data=\(loadGotoSplit() ?? [:])"
+        )
+
+        guard let browserPanelId = loadGotoSplit()?["browserPanelId"], !browserPanelId.isEmpty else {
+            XCTFail("Missing browserPanelId in goto_split setup data")
+            return
+        }
+
+        clickBrowserPane(app: app, browserPanelId: browserPanelId)
+
+        app.typeKey("g", modifierFlags: [.command])
+        XCTAssertTrue(
+            waitForGotoSplitMatch(timeout: 6.0) { data in
+                data["browserPageTitle"] == "page-handled-cmdg" &&
+                    data["browserFindVisible"] == "false"
+            },
+            "Expected Cmd+G to stay browser-local when browser find is hidden. data=\(loadGotoSplit() ?? [:])"
+        )
+
+        clickBrowserPane(app: app, browserPanelId: browserPanelId)
+
+        app.typeKey("f", modifierFlags: [.command, .shift])
+        XCTAssertTrue(
+            waitForGotoSplitMatch(timeout: 6.0) { data in
+                data["browserPageTitle"] == "page-handled-cmdshiftf" &&
+                    data["browserFindVisible"] == "false"
+            },
+            "Expected Cmd+Shift+F to stay browser-local when browser find is hidden. data=\(loadGotoSplit() ?? [:])"
+        )
+    }
+
+    func testBrowserFocusModeRoutesPageShortcutsAndDoubleEscapeExits() {
+        let app = launchWithBrowserSetup(browserURL: makeBrowserFocusModePageURL())
+
+        XCTAssertTrue(
+            waitForGotoSplitMatch(timeout: 10.0) { data in
+                data["browserPageTitle"] == "focus-ready"
+            },
+            "Expected the focus-mode test page to finish loading. data=\(loadGotoSplit() ?? [:])"
+        )
+
+        // Focus mode is a plain action in the overflow menu while inactive.
+        // Use its configured shortcut to enter it, then verify the active chip
+        // is promoted back into the inline accessory row.
+        app.typeKey(XCUIKeyboardKey.return.rawValue, modifierFlags: [.command, .option])
+
+        let focusModeButton = toolbarElement(app, identifier: "BrowserFocusModeButton")
+        XCTAssertTrue(
+            focusModeButton.waitForExistence(timeout: 5.0),
+            "Expected the active browser focus-mode chip to be promoted inline"
+        )
+
+        XCTAssertTrue(
+            waitForGotoSplitMatch(timeout: 5.0) { data in
+                data["browserFocusModeActive"] == "true"
+            },
+            "Expected the configured focus-mode shortcut to enter browser focus mode. data=\(loadGotoSplit() ?? [:])"
+        )
+
+        app.typeKey("f", modifierFlags: [.command])
+        XCTAssertTrue(
+            waitForGotoSplitMatch(timeout: 5.0) { data in
+                data["browserPageTitle"] == "focus-cmdf-1"
+            },
+            "Expected Cmd+F to reach the page while focus mode is active. data=\(loadGotoSplit() ?? [:])"
+        )
+
+        app.typeKey("p", modifierFlags: [.command])
+        XCTAssertTrue(
+            waitForGotoSplitMatch(timeout: 5.0) { data in
+                data["browserPageTitle"] == "focus-cmdp-1"
+            },
+            "Expected Cmd+P to reach the page while focus mode is active. data=\(loadGotoSplit() ?? [:])"
+        )
+
+        app.typeKey("s", modifierFlags: [.command])
+        XCTAssertTrue(
+            waitForGotoSplitMatch(timeout: 5.0) { data in
+                data["browserPageTitle"] == "focus-cmds-1"
+            },
+            "Expected Cmd+S to reach the page while focus mode is active. data=\(loadGotoSplit() ?? [:])"
+        )
+
+        app.typeKey(XCUIKeyboardKey.escape.rawValue, modifierFlags: [])
+        XCTAssertTrue(
+            waitForGotoSplitMatch(timeout: 5.0) { data in
+                data["browserPageTitle"] == "focus-escape-1" &&
+                    data["browserFocusModeActive"] == "true" &&
+                    data["browserFocusModeExitArmed"] == "true"
+            },
+            "Expected first Escape to reach the page and arm focus-mode exit. data=\(loadGotoSplit() ?? [:])"
+        )
+
+        app.typeKey(XCUIKeyboardKey.escape.rawValue, modifierFlags: [])
+        XCTAssertTrue(
+            waitForGotoSplitMatch(timeout: 5.0) { data in
+                data["browserPageTitle"] == "focus-escape-1" &&
+                    data["browserFocusModeActive"] == "false" &&
+                    data["browserFocusModeExitArmed"] == "false"
+            },
+            "Expected second Escape to exit focus mode without reaching the page. data=\(loadGotoSplit() ?? [:])"
+        )
+
+        XCTAssertFalse(
+            focusModeButton.exists,
+            "The inactive focus-mode action should return to the overflow menu"
+        )
+
+        let baselineAddTabInvocations = loadKeyequiv()["addTabInvocations"].flatMap(Int.init) ?? 0
+        app.typeKey("n", modifierFlags: [.command])
+        XCTAssertTrue(
+            waitForKeyequivInt(key: "addTabInvocations", toBeAtLeast: baselineAddTabInvocations + 1, timeout: 5.0),
+            "Expected Cmd+N to resume normal cmux routing after focus mode exit. data=\(loadKeyequiv())"
+        )
+    }
+
+    func testWideBrowserToolbarUsesOverflowForPlainActions() {
+        let app = launchWithBrowserSetup(browserURL: makeBrowserFocusModePageURL())
+
+        XCTAssertTrue(
+            waitForGotoSplitMatch(timeout: 10.0) { data in
+                data["browserPageTitle"] == "focus-ready"
+            },
+            "Expected the browser fixture to finish loading before checking toolbar controls. data=\(loadGotoSplit() ?? [:])"
+        )
+
+        let expectedInlineIdentifiers = [
+            "BrowserOverflowMenu",
+            "BrowserDesignModeButton",
+            "BrowserToggleDevToolsButton",
+            "BrowserProfileButton",
+            "BrowserThemeModeButton",
+        ]
+        for identifier in expectedInlineIdentifiers {
+            XCTAssertTrue(
+                toolbarElement(app, identifier: identifier).waitForExistence(timeout: 5.0),
+                "Expected the wide browser toolbar to expose \(identifier)"
+            )
+        }
+        XCTAssertGreaterThan(
+            toolbarElement(app, identifier: "BrowserOverflowMenu").frame.minX,
+            toolbarElement(app, identifier: "BrowserThemeModeButton").frame.maxX,
+            "More should be the rightmost accessory control"
+        )
+        XCTAssertGreaterThan(
+            toolbarElement(app, identifier: "BrowserToggleDevToolsButton").frame.minX,
+            toolbarElement(app, identifier: "BrowserThemeModeButton").frame.maxX,
+            "Inspect/DevTools should sit immediately before More"
+        )
+        XCTAssertGreaterThan(
+            toolbarElement(app, identifier: "BrowserOverflowMenu").frame.minX,
+            toolbarElement(app, identifier: "BrowserToggleDevToolsButton").frame.maxX,
+            "More should trail the Inspect/DevTools control"
+        )
+
+        let inlineOverflowActionIdentifiers = [
+            "BrowserFocusModeButton",
+            "BrowserScreenshotPageButton",
+            "BrowserScreenshotSectionButton",
+        ]
+        for identifier in inlineOverflowActionIdentifiers {
+            XCTAssertFalse(
+                toolbarElement(app, identifier: identifier).exists,
+                "The low-frequency action \(identifier) should remain in the overflow menu"
+            )
+        }
+
+        let overflowMenu = toolbarElement(app, identifier: "BrowserOverflowMenu")
+        overflowMenu.click()
+
+        let overflowActionIdentifiers = [
+            "BrowserOverflowFocusModeButton",
+            "BrowserScreenshotPageButton",
+            "BrowserScreenshotSectionButton",
+        ]
+        for identifier in overflowActionIdentifiers {
+            XCTAssertTrue(
+                app.menuItems.matching(identifier: identifier).firstMatch.waitForExistence(timeout: 5.0),
+                "Expected inactive action \(identifier) to remain available in BrowserOverflowMenu"
+            )
+        }
+        XCTAssertEqual(
+            app.menuItems.matching(identifier: "BrowserOverflowFocusModeButton").firstMatch.label,
+            "Focus Mode",
+            "Focus Mode should use the compact menu label"
+        )
+        XCTAssertEqual(
+            app.menuItems.matching(identifier: "BrowserScreenshotPageButton").firstMatch.label,
+            "Screenshot Page",
+            "Screenshot should use the compact menu label"
+        )
+        XCTAssertEqual(
+            app.menuItems.matching(identifier: "BrowserScreenshotSectionButton").firstMatch.label,
+            "Screenshot Section",
+            "Screenshot Section should use the concise menu label"
+        )
+        XCTAssertFalse(
+            app.menuItems.matching(identifier: "BrowserOverflowDesignModeButton").firstMatch.exists,
+            "Design Mode should remain directly available in the browser toolbar"
+        )
+        XCTAssertFalse(
+            app.menuItems.matching(identifier: "BrowserOverflowReactGrabButton").firstMatch.exists,
+            "React Grab should not be exposed in the browser chrome menu"
+        )
+        XCTAssertFalse(
+            app.menuItems.matching(identifier: "BrowserToggleDevToolsButton").firstMatch.exists,
+            "Developer Tools should remain directly available in the browser toolbar"
+        )
+
+        // Menu activation must use the same path as the former inline button:
+        // closing the menu should promote Focus Mode into the active inline chip.
+        let focusMenuItem = app.menuItems.matching(identifier: "BrowserOverflowFocusModeButton").firstMatch
+        focusMenuItem.click()
+        let activeFocusButton = toolbarElement(app, identifier: "BrowserFocusModeButton")
+        XCTAssertTrue(
+            waitForCondition(timeout: 5.0) { activeFocusButton.exists },
+            "Clicking Focus Mode in More should activate the inline focus chip"
+        )
+        XCTAssertTrue(
+            waitForGotoSplitMatch(timeout: 5.0) { data in
+                data["browserFocusModeActive"] == "true"
+            },
+            "Clicking Focus Mode in More should update the browser focus state. data=\(loadGotoSplit() ?? [:])"
+        )
+        app.typeKey(XCUIKeyboardKey.escape.rawValue, modifierFlags: [])
+        app.typeKey(XCUIKeyboardKey.escape.rawValue, modifierFlags: [])
+        XCTAssertTrue(
+            waitForCondition(timeout: 5.0) { !activeFocusButton.exists },
+            "Double Escape should leave the focus mode entered from More"
+        )
+    }
+
+    func testScreenshotSectionShowsTheCopiedFeedbackChip() {
+        let app = launchWithBrowserSetup(browserURL: makeBrowserFocusModePageURL())
+
+        XCTAssertTrue(
+            waitForGotoSplitMatch(timeout: 10.0) { data in
+                data["browserPageTitle"] == "focus-ready"
+            },
+            "Expected the browser fixture to finish loading before screenshot selection. data=\(loadGotoSplit() ?? [:])"
+        )
+        guard let browserPanelId = loadGotoSplit()?[
+            "browserPanelId"
+        ], !browserPanelId.isEmpty else {
+            XCTFail("Missing browserPanelId in goto_split setup data")
+            return
+        }
+
+        let browserPane = app.otherElements["BrowserPanelContent.\(browserPanelId)"].firstMatch
+        XCTAssertTrue(browserPane.waitForExistence(timeout: 6.0), "Expected browser pane content for screenshot selection")
+        toolbarElement(app, identifier: "BrowserOverflowMenu").click()
+        let sectionItem = app.menuItems.matching(identifier: "BrowserScreenshotSectionButton").firstMatch
+        XCTAssertTrue(sectionItem.waitForExistence(timeout: 5.0), "Expected Screenshot Section in More")
+        sectionItem.click()
+
+        let start = browserPane.coordinate(withNormalizedOffset: CGVector(dx: 0.25, dy: 0.30))
+        let end = browserPane.coordinate(withNormalizedOffset: CGVector(dx: 0.75, dy: 0.70))
+        start.press(forDuration: 0.2, thenDragTo: end)
+
+        let copiedChip = toolbarElement(app, identifier: "BrowserScreenshotPageCopied")
+        XCTAssertTrue(
+            waitForCondition(timeout: 10.0) { copiedChip.exists },
+            "Screenshot Section should surface the same Copied feedback chip as Screenshot Page"
+        )
+    }
+
+    func testBrowserDesignModeUsesTheSharedActiveModeChip() {
+        let app = launchWithBrowserSetup(browserURL: makeBrowserFocusModePageURL())
+
+        XCTAssertTrue(
+            waitForGotoSplitMatch(timeout: 10.0) { data in
+                data["browserPageTitle"] == "focus-ready"
+            },
+            "Expected the browser fixture to finish loading before entering Design Mode. data=\(loadGotoSplit() ?? [:])"
+        )
+
+        // Design Mode is inactive in the overflow menu. Its configured
+        // shortcut should promote the same single active-mode chip used by
+        // Focus Mode, without restoring any of the removed toolbar icons.
+        app.typeKey("d", modifierFlags: [.command, .option, .control])
+
+        let designModeButton = toolbarElement(app, identifier: "BrowserDesignModeButton")
+        XCTAssertTrue(
+            waitForCondition(timeout: 10.0) { designModeButton.exists },
+            "Expected active Design Mode to appear as the shared inline status chip"
+        )
+        XCTAssertEqual(
+            designModeButton.label,
+            "Design Mode",
+            "The active mode control should expose a concise text state instead of another toolbar glyph"
+        )
+        XCTAssertEqual(
+            browserToolbar(app).descendants(matching: .any).matching(identifier: "BrowserDesignModeButton").count,
+            1,
+            "Design Mode should have one active text control, not an additional inactive toolbar icon"
+        )
+        XCTAssertFalse(
+            toolbarElement(app, identifier: "BrowserFocusModeButton").exists,
+            "Focus Mode should not create a second active control while Design Mode is active"
+        )
+        XCTAssertFalse(
+            toolbarElement(app, identifier: "BrowserScreenshotPageButton").exists,
+            "Screenshot should remain in the overflow menu while Design Mode is active"
+        )
+        app.typeKey("d", modifierFlags: [.command, .option, .control])
+        XCTAssertTrue(
+            waitForCondition(timeout: 10.0) { !designModeButton.exists },
+            "Expected the shared Design Mode status chip to disappear after deactivation"
+        )
+    }
+
+    private func launchWithBrowserSetup(browserURL: String? = nil) -> XCUIApplication {
+        let app = XCUIApplication.cmuxTestApplication()
         app.launchEnvironment["CMUX_SOCKET_PATH"] = socketPath
         app.launchEnvironment["CMUX_UI_TEST_GOTO_SPLIT_SETUP"] = "1"
         app.launchEnvironment["CMUX_UI_TEST_GOTO_SPLIT_PATH"] = gotoSplitPath
         app.launchEnvironment["CMUX_UI_TEST_KEYEQUIV_PATH"] = keyequivPath
-        app.launch()
-        app.activate()
+        if let browserURL {
+            app.launchEnvironment["CMUX_UI_TEST_GOTO_SPLIT_BROWSER_URL"] = browserURL
+        }
+        launchAndEnsureForeground(app)
 
         XCTAssertTrue(
-            waitForGotoSplit(keys: ["browserPanelId", "webViewFocused"], timeout: 10.0),
-            "Expected goto_split setup data to be written"
+            waitForGotoSplit(keys: ["browserPanelId", "webViewFocused"], timeout: 25.0),
+            "Expected goto_split setup data to be written. data=\(loadGotoSplit() ?? [:])"
         )
 
         if let setup = loadGotoSplit() {
@@ -108,6 +510,186 @@ final class MenuKeyEquivalentRoutingUITests: XCTestCase {
         }
 
         return app
+    }
+
+    private func launchAndEnsureForeground(_ app: XCUIApplication) {
+        let options = XCTExpectedFailure.Options()
+        options.isStrict = false
+        XCTExpectFailure("App activation may fail on headless CI runners", options: options) {
+            app.launch()
+        }
+
+        if app.state == .runningForeground { return }
+
+        // launch() can leave the app backgrounded on some runners. Bring it to
+        // the foreground so subsequent typeKey() input is routed to cmux and not
+        // the wrong target; tolerate runners where activation genuinely can't win.
+        if app.state == .runningBackground {
+            app.activate()
+            if app.state == .runningForeground { return }
+            XCTExpectFailure("App could not be foregrounded on this runner", options: options) {
+                XCTFail("cmux stayed backgrounded after activate(); key input may not reach it. state=\(app.state.rawValue)")
+            }
+            return
+        }
+
+        XCTFail("App failed to start. state=\(app.state.rawValue)")
+    }
+
+    private func browserToolbar(_ app: XCUIApplication) -> XCUIElement {
+        app.descendants(matching: .any).matching(identifier: "BrowserToolbarAccessoryRow").firstMatch
+    }
+
+    private func toolbarElement(_ app: XCUIApplication, identifier: String) -> XCUIElement {
+        browserToolbar(app).descendants(matching: .any).matching(identifier: identifier).firstMatch
+    }
+
+    private func makeBrowserHandledCmdFPageURL() -> String {
+        let html = """
+        <!doctype html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <title>cmdf-pending</title>
+        </head>
+        <body tabindex="-1">
+          <main>Browser find shortcut passthrough</main>
+          <script>
+            window.addEventListener('load', () => {
+              document.body.focus();
+            });
+            window.addEventListener('keydown', (event) => {
+              const key = String(event.key || '').toLowerCase();
+              if (event.metaKey && !event.shiftKey && !event.altKey && !event.ctrlKey && key === 'f') {
+                event.preventDefault();
+                document.title = 'cmdf-handled';
+                document.body.dataset.cmdf = 'handled';
+              }
+            }, true);
+          </script>
+        </body>
+        </html>
+        """
+        return makeDataURL(html)
+    }
+
+    private func makeBrowserObservedCmdEPageURL() -> String {
+        let html = """
+        <!doctype html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <title>cmde-0</title>
+        </head>
+        <body tabindex="-1">
+          <main>Cmd+E should only reach the page once</main>
+          <script>
+            window.addEventListener('load', () => {
+              document.body.focus();
+            });
+            let countState = { value: 0 };
+            window.addEventListener('keydown', (event) => {
+              const key = String(event.key || '').toLowerCase();
+              if (event.metaKey && !event.shiftKey && !event.altKey && !event.ctrlKey && key === 'e') {
+                countState.value += 1;
+                document.title = `cmde-${countState.value}`;
+                document.body.dataset.cmdeCount = String(countState.value);
+              }
+            }, true);
+          </script>
+        </body>
+        </html>
+        """
+        return makeDataURL(html)
+    }
+
+    private func makeVisibleBrowserFindOwnershipPageURL() -> String {
+        let html = """
+        <!doctype html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <title>find-owner-idle</title>
+        </head>
+        <body tabindex="-1">
+          <main>needle alpha</main>
+          <main>needle beta</main>
+          <main>needle gamma</main>
+          <script>
+            window.addEventListener('load', () => {
+              document.body.focus();
+            });
+            window.addEventListener('keydown', (event) => {
+              const key = String(event.key || '').toLowerCase();
+              if (event.metaKey && !event.altKey && !event.ctrlKey && !event.shiftKey && key === 'g') {
+                event.preventDefault();
+                event.stopImmediatePropagation();
+                document.title = 'page-handled-cmdg';
+                return;
+              }
+              if (event.metaKey && event.shiftKey && !event.altKey && !event.ctrlKey && key === 'f') {
+                event.preventDefault();
+                event.stopImmediatePropagation();
+                document.title = 'page-handled-cmdshiftf';
+              }
+            }, true);
+          </script>
+        </body>
+        </html>
+        """
+        return makeDataURL(html)
+    }
+
+    private func makeBrowserFocusModePageURL() -> String {
+        let html = """
+        <!doctype html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <title>focus-loading</title>
+        </head>
+        <body tabindex="-1">
+          <main>Browser focus mode shortcut passthrough</main>
+          <script>
+            const counts = { f: 0, p: 0, s: 0, escape: 0 };
+            window.addEventListener('load', () => {
+              document.body.focus();
+              document.title = 'focus-ready';
+            });
+            window.addEventListener('keydown', (event) => {
+              const key = String(event.key || '').toLowerCase();
+              const plainCommand = event.metaKey && !event.shiftKey && !event.altKey && !event.ctrlKey;
+              if (plainCommand && (key === 'f' || key === 'p' || key === 's')) {
+                event.preventDefault();
+                event.stopImmediatePropagation();
+                counts[key] += 1;
+                document.title = `focus-cmd${key}-${counts[key]}`;
+                return;
+              }
+              if (!event.metaKey && !event.shiftKey && !event.altKey && !event.ctrlKey && key === 'escape') {
+                event.preventDefault();
+                event.stopImmediatePropagation();
+                counts.escape += 1;
+                document.title = `focus-escape-${counts.escape}`;
+              }
+            }, true);
+          </script>
+        </body>
+        </html>
+        """
+        return makeDataURL(html)
+    }
+
+    private func makeDataURL(_ html: String) -> String {
+        let encoded = Data(html.utf8).base64EncodedString()
+        return "data:text/html;base64,\(encoded)"
+    }
+
+    private func clickBrowserPane(app: XCUIApplication, browserPanelId: String) {
+        let browserPane = app.otherElements["BrowserPanelContent.\(browserPanelId)"].firstMatch
+        XCTAssertTrue(browserPane.waitForExistence(timeout: 6.0), "Expected browser pane content for click target")
+        browserPane.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.15))
     }
 
     private func refocusWebView(app: XCUIApplication) {
@@ -205,7 +787,7 @@ final class SplitCloseRightBlankRegressionUITests: XCTestCase {
     }
 
     func testClosingBothRightSplitsDoesNotLeaveBlankPane() {
-        let app = XCUIApplication()
+        let app = XCUIApplication.cmuxTestApplication()
         app.launchEnvironment["CMUX_UI_TEST_SPLIT_CLOSE_RIGHT_SETUP"] = "1"
         app.launchEnvironment["CMUX_UI_TEST_SPLIT_CLOSE_RIGHT_PATH"] = dataPath
         app.launchEnvironment["CMUX_SOCKET_PATH"] = socketPath
@@ -251,7 +833,7 @@ final class SplitCloseRightBlankRegressionUITests: XCTestCase {
     }
 
     func testReproBlankAfterClosingRightSplitsViaShortcuts() {
-        let app = XCUIApplication()
+        let app = XCUIApplication.cmuxTestApplication()
         app.launchEnvironment["CMUX_UI_TEST_DIAGNOSTICS_PATH"] = diagnosticsPath
         app.launchEnvironment["CMUX_UI_TEST_SPLIT_CLOSE_RIGHT_SETUP"] = "1"
         app.launchEnvironment["CMUX_UI_TEST_SPLIT_CLOSE_RIGHT_PATH"] = dataPath
@@ -299,7 +881,7 @@ final class SplitCloseRightBlankRegressionUITests: XCTestCase {
     }
 
     func testReproStretchAfterClosingSingleRightSplit() {
-        let app = XCUIApplication()
+        let app = XCUIApplication.cmuxTestApplication()
         app.launchEnvironment["CMUX_UI_TEST_DIAGNOSTICS_PATH"] = diagnosticsPath
         app.launchEnvironment["CMUX_UI_TEST_SPLIT_CLOSE_RIGHT_SETUP"] = "1"
         app.launchEnvironment["CMUX_UI_TEST_SPLIT_CLOSE_RIGHT_PATH"] = dataPath
@@ -337,7 +919,7 @@ final class SplitCloseRightBlankRegressionUITests: XCTestCase {
     }
 
     func testReproBlankAfterClosingBottomSplitsViaShortcuts() {
-        let app = XCUIApplication()
+        let app = XCUIApplication.cmuxTestApplication()
         app.launchEnvironment["CMUX_UI_TEST_DIAGNOSTICS_PATH"] = diagnosticsPath
         app.launchEnvironment["CMUX_UI_TEST_SPLIT_CLOSE_RIGHT_SETUP"] = "1"
         app.launchEnvironment["CMUX_UI_TEST_SPLIT_CLOSE_RIGHT_PATH"] = dataPath
@@ -380,7 +962,7 @@ final class SplitCloseRightBlankRegressionUITests: XCTestCase {
     }
 
     func testReproBlankAfterClosingRightSplitsTopFirstWithGap() {
-        let app = XCUIApplication()
+        let app = XCUIApplication.cmuxTestApplication()
         app.launchEnvironment["CMUX_UI_TEST_DIAGNOSTICS_PATH"] = diagnosticsPath
         app.launchEnvironment["CMUX_UI_TEST_SPLIT_CLOSE_RIGHT_SETUP"] = "1"
         app.launchEnvironment["CMUX_UI_TEST_SPLIT_CLOSE_RIGHT_PATH"] = dataPath
@@ -424,7 +1006,7 @@ final class SplitCloseRightBlankRegressionUITests: XCTestCase {
     }
 
     func testReproBlankAfterClosingRightSplitsBottomFirstViaShortcuts() {
-        let app = XCUIApplication()
+        let app = XCUIApplication.cmuxTestApplication()
         app.launchEnvironment["CMUX_UI_TEST_DIAGNOSTICS_PATH"] = diagnosticsPath
         app.launchEnvironment["CMUX_UI_TEST_SPLIT_CLOSE_RIGHT_SETUP"] = "1"
         app.launchEnvironment["CMUX_UI_TEST_SPLIT_CLOSE_RIGHT_PATH"] = dataPath
@@ -469,7 +1051,7 @@ final class SplitCloseRightBlankRegressionUITests: XCTestCase {
     }
 
     func testReproBlankAfterClosingRightSplitsWithoutFocusingRightPanes() {
-        let app = XCUIApplication()
+        let app = XCUIApplication.cmuxTestApplication()
         app.launchEnvironment["CMUX_UI_TEST_DIAGNOSTICS_PATH"] = diagnosticsPath
         app.launchEnvironment["CMUX_UI_TEST_SPLIT_CLOSE_RIGHT_SETUP"] = "1"
         app.launchEnvironment["CMUX_UI_TEST_SPLIT_CLOSE_RIGHT_PATH"] = dataPath
@@ -875,7 +1457,7 @@ final class SplitCloseRightBlankRegressionUITests: XCTestCase {
     // MARK: - Automation Socket Client (UI Tests)
 
     private func waitForSocketPong(timeout: TimeInterval) -> Bool {
-        waitForCondition(timeout: timeout) {
+        waitForControlSocketReady(socketPath: socketPath, pingTimeout: timeout) {
             self.socketCommand("ping") == "PONG"
         }
     }
